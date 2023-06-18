@@ -104,6 +104,8 @@ int print_tss_request = 0;
 int print_tss_response = 0;
 int nocache = 0;
 int save_shshblobs = 0;
+int update_install = 0;
+int erase_install = 0;
 int save_bplist = 0;
 const char *shshSavePath = "."DIRECTORY_DELIMITER_STR;
 
@@ -124,6 +126,12 @@ static struct bbdevice bbdevices[] = {
     {"Mac13,2", 0, 0},         // Mac Studio (M1 Ultra, 2022)
     {"Mac14,2", 0, 0},         // MacBook Air (M2, 2022)
     {"Mac14,7", 0, 0},         // MacBook Pro (13-inch, M2, 2022)
+    {"Mac14,3", 0, 0},         // Mac mini (M2, 2023)
+    {"Mac14,5", 0, 0},         // MacBook Pro (14-inch, M2 Max, 2023)
+    {"Mac14,6", 0, 0},         // MacBook Pro (16-inch, M2 Max, 2023)
+    {"Mac14,9", 0, 0},         // MacBook Pro (14-inch, M2 Pro, 2023)
+    {"Mac14,10", 0, 0},        // MacBook Pro (16-inch, M2 Pro, 2023)
+    {"Mac14,12", 0, 0},        // Mac mini (M2 Pro, 2023)
     
     // Apple Displays
     {"AppleDisplay2,1", 0, 0}, // Studio Display
@@ -339,6 +347,7 @@ static struct bbdevice bbdevices[] = {
     {"AudioAccessory1,1",   0, 0},   // HomePod 1st gen
     {"AudioAccessory1,2",   0, 0},   // HomePod 1st gen (2018)
     {"AudioAccessory5,1",   0, 0},   // HomePod mini
+    {"AudioAccessory6,1",   0, 0},   // HomePod 2nd gen
     
     // Apple TVs
     {"AppleTV1,1",   0, 0},  // 1st gen
@@ -346,7 +355,7 @@ static struct bbdevice bbdevices[] = {
     {"AppleTV3,1",   0, 0},  // 3rd gen
     {"AppleTV3,2",   0, 0},  // 3rd gen (2013)
     {"AppleTV5,3",   0, 0},  // 4th gen
-    {"AppleTV6,2",   0, 0},  // 4K
+    {"AppleTV6,2",   0, 0},  // 4K 1st gen
     {"AppleTV11,1",  0, 0},  // 4K 2nd gen
     {"AppleTV14,1",  0, 0},  // 4K 3rd gen
     {NULL, 0, 0}
@@ -558,7 +567,7 @@ malloc_rets:
                     }
                 }
                 
-                info("[TSSC] Got the firmware URL for version %.*s build %.*s.\n",(int)i_vers->size, i_vers->value,(int)i_build->size, i_build->value);
+                info("[TSSC] Got the URL for firmware version %.*s build %.*s\n",(int)i_vers->size, i_vers->value,(int)i_build->size, i_build->value);
                 rets->version = (char*)malloc(i_vers->size+1);
                 memcpy(rets->version, i_vers->value, i_vers->size);
                 rets->version[i_vers->size] = '\0';
@@ -614,7 +623,7 @@ int downloadPartialzip(const char *url, const char *file, const char *dst){
 char *getBuildManifest(char *url, const char *device, const char *version, const char *buildID, int isOta){
     struct stat st = {0};
     
-    size_t len = strlen(MANIFEST_SAVE_PATH) + strlen("/__") + strlen(device) + strlen(version) +1;
+    size_t len = strlen(MANIFEST_SAVE_PATH) + strlen("/__") + strlen(device) + strlen(version) +1 + strlen(".plist");
     if (buildID) len += strlen(buildID);
     if (isOta) len += strlen("ota");
     char *fileDir = malloc(len);
@@ -630,7 +639,8 @@ char *getBuildManifest(char *url, const char *device, const char *version, const
         strcat(fileDir, buildID);
     }
     
-    if (isOta) strcat(fileDir, "ota");
+    if (isOta) strcat(fileDir, "_OTA");
+    strcat(fileDir, ".plist");
     
     memset(&st, 0, sizeof(st));
     if (stat(MANIFEST_SAVE_PATH, &st) == -1) __mkdir(MANIFEST_SAVE_PATH, 0700);
@@ -644,8 +654,8 @@ char *getBuildManifest(char *url, const char *device, const char *version, const
     FILE *f = fopen(fileDir, "rb");
     if (!url) {
         if (!f || nocache) return NULL;
-        info("[TSSC] Using cached BuildManifest for %s.\n",name);
-    }else info("[TSSC] Opening the BuildManifest for %s.\n",name);
+        info("[TSSC] Using cached BuildManifest: %s\n",name);
+    }else info("[TSSC] Opening BuildManifest: %s\n",name);
     
     if (!f || nocache){
         //download if it isn't there
@@ -718,6 +728,8 @@ int tss_populate_devicevals(plist_t tssreq, uint64_t ecid, char *nonce, size_t n
     plist_dict_set_item(tssreq, "ApECID", plist_new_uint(ecid)); //0000000000000000
     if (nonce) {
         plist_dict_set_item(tssreq, "ApNonce", plist_new_data((const char*)nonce, (int)nonce_size));//aa aa aa aa bb cc dd ee ff 00 11 22 33 44 55 66 77 88 99 aa
+    } else {
+        plist_dict_set_item(tssreq, "ApNonce", plist_new_data(NULL, 0));
     }
     
     if (sep_nonce) {//aa aa aa aa bb cc dd ee ff 00 11 22 33 44 55 66 77 88 99 aa
@@ -1045,11 +1057,18 @@ int isManifestBufSignedForDevice(char *buildManifestBuffer, t_devicevals *devVal
             if (tssreq2) plist_free(tssreq2);
             devVals->installType = kInstallTypeDefault;
         }
-        {
+        if (update_install) {
+            plist_t tssreq2 = NULL;
+        }
+        else if (erase_install) {
+            plist_t tssreq2 = NULL;
+        }
+        else {
             plist_t tssreq2 = NULL;
             char *apnonce = devVals->apnonce;
             size_t apnonceLen = devVals->parsedApnonceLen;
             t_installType installType = devVals->installType;
+            info("[TSSC] Also requesting an APTicket without a nonce.\n");
             devVals->parsedApnonceLen = 0;
             devVals->apnonce = (char *)0x1337;
             devVals->installType = kInstallTypeErase;
@@ -1075,12 +1094,15 @@ int isManifestBufSignedForDevice(char *buildManifestBuffer, t_devicevals *devVal
         plist_get_uint_val(pecid, &devVals->ecid);
         char *cecid = ecid_to_string(devVals->ecid);
         
-        if (*devVals->generator)
+        if (*devVals->generator) {
             plist_dict_set_item(apticket, "generator", plist_new_string(devVals->generator));
-        if (apticket2)
+        }
+        if (apticket2) {
             plist_dict_set_item(apticket, "updateInstall", apticket2);
-        if (apticket3)
+        }
+        if (apticket3) {
             plist_dict_set_item(apticket, "noNonce", apticket3);
+        }
         
         uint32_t size = 0;
         char* data = NULL;
@@ -1209,7 +1231,7 @@ int isVersionSignedForDevice(jssytok_t *firmwareTokens, t_iosVersion *versVals, 
     char *buildManifest = NULL;
     
     t_versionURL *urls = getFirmwareUrls(devVals->deviceModel, versVals, firmwareTokens);
-    if (!urls) reterror("[TSSC] Could not get the firmware URL to version %s for %s!\n",(!versVals->version ? versVals->buildID : versVals->version),devVals->deviceModel);
+    if (!urls) reterror("[TSSC] Could not get the URL to firmware version %s for %s!\n",(!versVals->version ? versVals->buildID : versVals->version),devVals->deviceModel);
 
     int cursigned = 0;
     for (t_versionURL *u = urls; u->url; u++) {
